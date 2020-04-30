@@ -8,7 +8,7 @@ class DataBase:
     def __init__(self, metadata, db_engine):
         self.metadata = metadata
         self.engine = db_engine
-        if self.engine.url.drivername is not 'mysql':
+        if self.engine.url.drivername != 'mysql':
             self.isMySql = False
         else:
             self.isMySql = True
@@ -26,6 +26,17 @@ class DataBase:
             else:
                 table_object.tracking = False
 
+    def tree(self):
+        # Build a JSON tree of database structure
+        table_list = {}
+        for table_name, table_obj in self.metadata.tables.items():
+            column_list = {}
+            # table_item = {table_name: []}
+            for column_name, column_object in table_obj.columns.items():
+                column_list.update({column_name: str(column_object.type)})
+            table_list.update({table_name: column_list})
+        return True, {"message": "DB tree data obtained OK", "db_tree": table_list}
+
     def obtain(self, table_name, table_id, obtain_deleted=False):
         try:
             table_object = self.metadata.tables[table_name]
@@ -33,10 +44,9 @@ class DataBase:
             return False, "Table required %s not found" % table_name
 
         query = select([table_object]).where(table_object.columns.id == table_id)
-        is_ok, result = self.connection_execute(query)
+        is_ok, result = self.connection_execute(query, fetchall=True)
         if not is_ok:
             return False, result
-        result = result.fetchall()
         if not len(result):
             return False, "%s ID %d not found in the DB" % (table_object.name, table_id)
         if len(result) > 1:
@@ -133,26 +143,58 @@ class DataBase:
                 return False, "Error while deleting %s with ID %d" % (table_name, table_id)
             return True, {"message": "%s with ID %d deleted OK" % (table_name, table_id)}
 
-    def obtain_all(self, table_name):
+    def remove_all(self, table_name, hard=False):
+        try:
+            table_object = self.metadata.tables[table_name]
+        except KeyError:
+            return False, "Table required '%s' not found" % table_name
+
+        if table_object.tracking and not hard:
+            # Get the row with this id
+            is_ok, data = self.obtain_all(table_name, obtain_deleted=True)
+            if is_ok:
+                deleted_items = 0
+                not_deleted_items = 0
+                for item in data[table_name]:
+                    # Check if item has been already deleted
+                    if not item["deleted_at"]:
+                        not_deleted_items += 1
+                        now = datetime.now()
+                        new_data = {"deleted_at": datetime.strftime(now, "%d/%m/%Y, %H:%M:%S")}
+                        is_ok, data = self.modify(table_name, item['id'], new_data, True)
+                        if is_ok:
+                            deleted_items += 1
+                return True, {"message": "%d of %d deleted" % (deleted_items, not_deleted_items)}
+            else:
+                return False, data
+        else:
+            is_ok, result = self.connection_execute(table_object.delete())
+            if not is_ok:
+                return False, result
+            if not result.rowcount:
+                return False, "Error while deleting %s table records" % table_name
+            return True, {"message": "%s table records deleted OK" % table_name}
+
+    def obtain_all(self, table_name, obtain_deleted=False):
         try:
             table_object = self.metadata.tables[table_name]
         except KeyError:
             return False, "Table required %s not found" % table_name
 
         query = select([table_object])
-        is_ok, result = self.connection_execute(query)
+        is_ok, result = self.connection_execute(query,  fetchall=True)
         if not is_ok:
             return False, result
-        result = result.fetchall()
 
         if not len(result):
             return False, "No items found in the table %s for the DB" % table_name
         item_list = []
         for row in result:
             row_json = self.format_out_json(row)
-            # Do not return deleted items
-            if table_object.tracking and row_json["deleted_at"]:
-                continue
+            if not obtain_deleted:
+                # Do not return deleted items
+                if table_object.tracking and row_json["deleted_at"]:
+                    continue
             item_list.append(row_json)
         return True, {"message": "%s obtained OK" % table_name, table_name: item_list}
 
@@ -166,10 +208,9 @@ class DataBase:
         except KeyError:
             return False, "Column required %s for the Table %s not found" % (filter_name, table_name)
         query = select([table_object]).where(column_object.in_(filter_list))
-        is_ok, result = self.connection_execute(query)
+        is_ok, result = self.connection_execute(query,  fetchall=True)
         if not is_ok:
             return False, result
-        result = result.fetchall()
         if not len(result):
             return False, "No items found in the table €s for the DB" % table_name
         item_list = []
@@ -181,64 +222,59 @@ class DataBase:
             item_list.append(row_json)
         return True, {"message": "%s obtained OK" % table_name, table_name: item_list}
 
-    def get_db(self, table_name=None):
-        if table_name:
-            try:
-                table_object = [table_name]
-            except KeyError:
-                return False, "Table required '%s' not found" % table_name
-        else:
-            try:
-                table_object = list(self.metadata.tables.keys())
-            except KeyError:
-                return False, "Tables names required are not found"
+    def get_db(self):
+        table_object = list(self.metadata.tables.keys())
         data_all = {}
         data_table = []
         for table_item in table_object:
             query = select([self.metadata.tables[table_item]]) \
                 .where(self.metadata.tables[table_item].columns.id != 0)
-            is_ok, result = self.connection_execute(query)
+            is_ok, result = self.connection_execute(query, fetchall=True)
             if not is_ok:
                 return False, result
-            result = result.fecthall()
             for data_item in result:
                 data_table.append(self.format_out_json(data_item))
             data_all[table_item] = data_table
             data_table = []
         return True, data_all
 
-    def clean_db(self, table_name=None):
-        if table_name:
-            try:
-                table_objects = [self.metadata.tables[table_name]]
-            except KeyError:
-                return False, "Table required '%s' not found" % table_name
-        else:
-            try:
-                table_objects = self.metadata.sorted_tables
-            except KeyError:
-                return False, "Tables names required are not found"
-
-        if self.isMySql:
-            self.connection_execute('SET FOREIGN_KEY_CHECKS = 0;')
-        for table_item in table_objects:
-            try:
-                self.connection_execute(table_item.delete().where(table_item.columns.id != 0))
-            except exc.SQLAlchemyError as Error:
-                message = Error.__str__()
-                if self.isMySql:
-                    self.connection_execute('SET FOREIGN_KEY_CHECKS = 1;')
-                return False, message
-        if self.isMySql:
-            self.connection_execute('SET FOREIGN_KEY_CHECKS = 1;')
-        return True, {"message": "The database has been cleared successfully."}
-
-    def drop_db(self):
+    def _drop_db(self):
         try:
             self.metadata.drop_all(bind=self.engine)
         except exc.SQLAlchemyError as Error:
             return False, Error.__str__()
-        return True, {"message": "All tables have been dropped succesfuly."}
+        return True, {"message": "All tables have been dropped successfully."}
+
+    def restart_engine(self):
+        self._drop_db()
+        self.metadata.create_all(self.engine)
+        return True, {"message": "DB restarted OK"}
+
+    def db_init_from_json(self, data):
+        # Restart the db before loading new data (drop all tables)
+        self.restart_engine()
+        json_data = data
+        db_tables = self.metadata.sorted_tables
+        for table_obj in db_tables:
+            # Check if table name is from user or company db
+            if table_obj.name in json_data.keys():
+                insert_data = True
+            else:
+                print("Table  %s is missing in JSON file, not initialized" % table_obj.name)
+                insert_data = False
+
+            if insert_data:
+                for item in json_data[table_obj.name]:
+                    # Format input JSOn
+                    input_json = self.format_in_json(item, table_obj.types)
+                    if table_obj.tracking:
+                        input_json["created_at"] = datetime.now()
+                        input_json["updated_at"] = datetime.now()
+                    is_ok, result = self.connection_execute(table_obj.insert(), input_json)
+                    if not is_ok:
+                        return False, result
+               
+        return True, {"message": "The database has been filled successfully."}
 
     def connect_engine(self):
         if not self.__connection:
@@ -250,43 +286,24 @@ class DataBase:
             # Do nothing, connection already open
             pass
 
-    def db_init_from_json(self, data):
-        json_data = data
-        db_tables = list(self.metadata.tables.keys())
-        # Open the connection for both databases
-        self.connect_engine()
-        for key, value in json_data.items():
-            # Check if table name is from user or company db
-            if key in db_tables:
-                insert_data = True
-            else:
-                print("key: %s from JSON file is unknown, it has been ignored" % key)
-                insert_data = False
-
-            if insert_data:
-                input_json = []
-                for item in value:
-                    # Format input JSOn
-                    input_json.append(self.format_in_json(item, self.metadata.tables[key].types))                
-                    is_ok, result = self.connection_execute(self.metadata.tables[key].insert())
-                    if not is_ok:
-                        return False, result
-               
-        return True, {"message": "The database has been filled successfully."}
-
     def disconnect_engine(self):
         self.__connection.close()
         self.__connection = None
 
-    def connection_execute(self, query, data=None, disconnect=True):
+    def connection_execute(self, query, data=None, disconnect=True, fetchall=False):
         is_ok, result = True, None
         if not self.__connection:
             self.connect_engine()
         try:
-            result = self.__connection.execute(query, data)
+            if data:
+                result = self.__connection.execute(query, data)
+            else:
+                result = self.__connection.execute(query)
         except exc.SQLAlchemyError as Error:
             is_ok = False
             result = Error.__str__()
+        if is_ok and fetchall:
+            result = result.fetchall()
         if disconnect:
             self.disconnect_engine()
         return is_ok, result
@@ -323,12 +340,6 @@ class DataBase:
         new_json = dict(json_data)
         for key, value in json_data.items():
             # Get the type
-            if key == 'email':
-                if type(value) is str:
-                    value = value.lower()
-                else:
-                    for idx, val in enumerate(value):
-                        new_json[key][idx] = val.lower()
             if key in table_types.keys():
                 var_type = table_types[key]
                 replace_value = True

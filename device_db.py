@@ -6,7 +6,6 @@ from database import DataBase
 class DeviceDB(DataBase):
 
     def __init__(self, db_path):
-        print("Device DB constructor")
         engine_name = "sqlite:///" + db_path
         self.engine = create_engine(engine_name, echo=True)
         self.metadata = MetaData(bind=None)
@@ -64,3 +63,4 @@ class DeviceDB(DataBase):
         self.metadata.create_all(self.engine)
         # Init base class data
         DataBase.__init__(self, self.metadata, self.engine)
+
